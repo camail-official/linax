@@ -69,6 +69,7 @@ class LinOSS(eqx.nn.StatefulLayer, PartialModule):
         drop_rate: float = 0.1,
         prenorm: bool = True,
         use_bias: bool = True,
+        dtype: jnp.dtype = jnp.float32,
         **kwargs,
     ):
         """Initialize the LinOSS model.
@@ -97,6 +98,7 @@ class LinOSS(eqx.nn.StatefulLayer, PartialModule):
             drop_rate: dropout rate for blocks.
             prenorm: whether to apply prenorm in blocks.
             use_bias: whether to use bias in GLU channel mixers.
+            dtype: dtype for LinOSS sequence mixer parameters and computation.
             *args: Additional positional arguments (ignored).
             **kwargs: Additional keyword arguments (ignored).
         """
@@ -129,6 +131,7 @@ class LinOSS(eqx.nn.StatefulLayer, PartialModule):
                 theta_max=theta_max,
                 A_max=A_max,
                 G_max=G_max,
+                dtype=dtype,
             )
 
             # Build channel mixer

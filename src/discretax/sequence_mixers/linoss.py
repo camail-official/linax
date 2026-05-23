@@ -139,6 +139,7 @@ class LinOSSSequenceMixer(AbstractSequenceMixer):
     head_hidden_dim: int = eqx.field(static=True)
     head_state_dim: int = eqx.field(static=True)
     use_head_output_projection: bool = eqx.field(static=True)
+    compute_dtype: jnp.dtype = eqx.field(static=True)
 
     def __init__(
         self,
@@ -204,6 +205,7 @@ class LinOSSSequenceMixer(AbstractSequenceMixer):
         self.head_hidden_dim = in_features // num_heads
         self.head_state_dim = state_dim // num_heads
         self.use_head_output_projection = use_head_output_projection and num_heads > 1
+        self.compute_dtype = dtype
 
         # Key generator
         def key_gen(key: PRNGKeyArray):
@@ -278,8 +280,10 @@ class LinOSSSequenceMixer(AbstractSequenceMixer):
         Returns:
             The output of the LinOSS sequence mixer.
         """
+        input_dtype = x.dtype
+        x = x.astype(self.compute_dtype)
         steps = nn.sigmoid(self.steps)
-        return self._apply_multi_head(x, steps)
+        return self._apply_multi_head(x, steps).astype(input_dtype)
 
     def _apply_multi_head(self, x: Array, steps: Array) -> Array:
         """Apply independent LinOSS heads and merge them back into the hidden stream."""
@@ -289,10 +293,10 @@ class LinOSSSequenceMixer(AbstractSequenceMixer):
         ys = jax.vmap(self._apply_recurrence)(
             self.A_diag, G_diag, self.B, scan_inputs, steps, self.gamma_log
         )
-        ys = jnp.swapaxes(ys, 0, 1)  # (L, num_heads, head_state_dim) complex
+        ys = jnp.swapaxes(ys, 0, 1)  # (L, num_heads, head_state_dim, real/imag)
 
-        C_complex = self.C[..., 0] + 1j * self.C[..., 1]
-        head_outputs = jnp.real(jnp.einsum("hfs,lhs->lhf", C_complex, ys))
+        head_outputs = jnp.einsum("hfsi,lhsi->lhfi", self.C, ys)
+        head_outputs = head_outputs[..., 0] - head_outputs[..., 1]
         head_outputs = head_outputs + x_heads * self.D[None, ...]
 
         xs = head_outputs.reshape(x.shape[0], x.shape[1])
@@ -309,7 +313,7 @@ class LinOSSSequenceMixer(AbstractSequenceMixer):
         steps: Array,
         gamma_log: Array,
     ) -> Array:
-        """Apply one head's LinOSS recurrence. Returns (L, head_state_dim) complex."""
+        """Apply one head's LinOSS recurrence. Returns (L, head_state_dim, real/imag)."""
         if self.stability == "oscillatory":
             A, G = _project_ag_oscillatory(
                 self.discretization, A_diag, G_diag, steps, self.projection_eps
@@ -319,8 +323,7 @@ class LinOSSSequenceMixer(AbstractSequenceMixer):
                 self.discretization, A_diag, G_diag, steps, self.projection_eps
             )
         mat_fn = MATRIX_FNS[self.discretization]
-        B_complex = B[..., 0] + 1j * B[..., 1]
-        return _apply_linoss(mat_fn, A, G, B_complex, x, steps, gamma_log)
+        return _apply_linoss(mat_fn, A, G, B, x, steps, gamma_log)
 
 
 # --- Initialization Helpers ----------------------------------
@@ -600,26 +603,35 @@ def _apply_linoss_scan(
     return xs[:, state_dim:]
 
 
-def _apply_linoss(mat_fn, A, G, B_complex, x, step, gamma_log):
-    """Unified LinOSS apply using a matrix function from MATRIX_FNS.
+def _apply_linoss(mat_fn, A, G, B, x, step, gamma_log):
+    """Unified real-pair LinOSS apply using a matrix function from MATRIX_FNS.
 
     Args:
         mat_fn: A function from MATRIX_FNS returning (M_11, M_12, M_21, M_22, f1, f2).
         A: Diagonal state matrix.
         G: Diagonal damping matrix (zeros for undamped).
-        B_complex: Input matrix.
+        B: Real-pair input matrix with trailing real/imag dimension.
         x: Input sequence of features.
         step: Pre-activated discretization time-steps.
         gamma_log: Per-mode log input gain, shape (state_dim,). Zeros = no-op.
 
     Returns:
-        Hidden state sequence of shape (L, state_dim), complex.
+        Hidden state sequence of shape (L, state_dim, real/imag).
     """
-    Bu = jax.vmap(lambda u: B_complex @ u)(x)
-    Bu = Bu * jnp.exp(gamma_log)[None, :]
+    Bu = jnp.einsum("shi,lh->lsi", B, x)
+    Bu = Bu * jnp.exp(gamma_log)[None, :, None]
 
     M_11, M_12, M_21, M_22, f1, f2 = mat_fn(A, G, step)
-    F1 = Bu * f1[None, :]
-    F2 = Bu * f2[None, :]
+    F1 = Bu * f1[None, :, None]
+    F2 = Bu * f2[None, :, None]
 
-    return _apply_linoss_scan(M_11, M_12, M_21, M_22, F1, F2)
+    state_dim = M_11.shape[0]
+    ys = _apply_linoss_scan(
+        jnp.repeat(M_11, 2),
+        jnp.repeat(M_12, 2),
+        jnp.repeat(M_21, 2),
+        jnp.repeat(M_22, 2),
+        F1.reshape(F1.shape[0], state_dim * 2),
+        F2.reshape(F2.shape[0], state_dim * 2),
+    )
+    return ys.reshape(ys.shape[0], state_dim, 2)

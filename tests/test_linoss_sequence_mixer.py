@@ -1,4 +1,4 @@
-"""Reference-equivalence tests for real-pair sequence mixer implementations."""
+"""Tests for LinOSS sequence mixer implementations."""
 
 from __future__ import annotations
 
@@ -164,22 +164,32 @@ def test_linoss_sequence_mixer_matches_reference(discretization: str, damping: b
     _assert_no_complex_leaves(mixer)
 
 
-@pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
-def test_linoss_real_pair_supports_low_precision(dtype):
-    """LinOSS paired-real path can be cast to low precision and still execute."""
-    linoss = jax.tree.map(
-        lambda leaf: (
-            leaf.astype(dtype)
-            if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating)
-            else leaf
-        ),
-        LinOSSSequenceMixer(in_features=4, state_dim=6, key=jr.PRNGKey(6)),
-    )
+@pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16, jnp.float32])
+def test_linoss_dtype_controls_real_parameters(dtype):
+    """LinOSS initializes and executes real-valued parameters in the requested dtype."""
+    linoss = LinOSSSequenceMixer(in_features=4, state_dim=6, dtype=dtype, key=jr.PRNGKey(6))
     x = jr.normal(jr.PRNGKey(7), (5, 4)).astype(dtype)
 
     linoss_outputs = linoss(x, key=jr.PRNGKey(8))
 
+    for leaf in jax.tree.leaves(linoss):
+        if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating):
+            assert leaf.dtype == dtype
     assert jnp.isfinite(linoss_outputs).all()
+    assert linoss_outputs.dtype == dtype
+    _assert_no_complex_leaves(linoss)
+
+
+def test_linoss_forward_jaxpr_has_no_complex_intermediates():
+    """LinOSS forward pass uses real-valued JAX operations, not complex intermediates."""
+    linoss = LinOSSSequenceMixer(in_features=4, state_dim=6, key=jr.PRNGKey(6))
+    x = jr.normal(jr.PRNGKey(7), (5, 4))
+
+    jaxpr_text = str(jax.make_jaxpr(lambda inputs: linoss(inputs, key=jr.PRNGKey(8)))(x))
+
+    assert "c64" not in jaxpr_text
+    assert "c128" not in jaxpr_text
+    assert "complex" not in jaxpr_text.lower()
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import jax.random as jr
 import pytest
 
@@ -205,3 +206,18 @@ def test_linoss_model_rejects_invalid_head_partition():
 
     with pytest.raises(ValueError, match="state_dim=30 must be divisible by num_heads=4"):
         LinOSS(hidden_dim=16, state_dim=30, num_heads=4, key=jr.PRNGKey(6))
+
+
+def test_linoss_model_passes_dtype_to_sequence_mixers():
+    """LinOSS model forwards dtype to its sequence mixer blocks."""
+    model = LinOSS(
+        hidden_dim=16,
+        num_blocks=2,
+        state_dim=32,
+        dtype=jnp.bfloat16,
+        key=jr.PRNGKey(7),
+    )
+
+    for block in model.blocks:
+        assert block.sequence_mixer.B.dtype == jnp.bfloat16
+        assert block.sequence_mixer.C.dtype == jnp.bfloat16
