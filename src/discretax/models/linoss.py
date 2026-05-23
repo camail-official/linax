@@ -54,13 +54,22 @@ class LinOSS(eqx.nn.StatefulLayer, PartialModule):
         hidden_dim: int,
         num_blocks: int = 4,
         state_dim: int = 64,
-        discretization: Literal["IM", "IMEX"] = "IMEX",
+        num_heads: int = 1,
+        use_head_output_projection: bool = False,
+        discretization: Literal["IM", "IMEX", "IMEX2", "IMEX3", "EX"] = "IMEX",
+        initialization: Literal["RT", "AG"] = "AG",
         damping: bool = True,
+        stability: Literal["oscillatory", "stable"] = "oscillatory",
+        projection_eps: float = 0.0,
+        input_normalization: bool = False,
         r_min: float = 0.9,
-        theta_max: float = jnp.pi,
+        theta_max: float = jnp.pi / 4,
+        A_max: float = 1.0,
+        G_max: float = 1.0,
         drop_rate: float = 0.1,
         prenorm: bool = True,
         use_bias: bool = True,
+        dtype: jnp.dtype = jnp.float32,
         **kwargs,
     ):
         """Initialize the LinOSS model.
@@ -70,16 +79,36 @@ class LinOSS(eqx.nn.StatefulLayer, PartialModule):
             hidden_dim: hidden dimension for the model.
             num_blocks: number of LinOSS blocks to stack.
             state_dim: state space dimension for LinOSS sequence mixers.
-            discretization: discretization method ("IM" or "IMEX").
+            num_heads: number of independent LinOSS heads.
+            use_head_output_projection: whether to apply a dense projection after
+                concatenating multi-head outputs.
+            discretization: discretization method ("IM", "IMEX", "IMEX2", "IMEX3", or "EX").
+            initialization: initialization strategy for damped variants ("AG" or "RT").
             damping: whether to use damping in LinOSS.
+            stability: "oscillatory" (complex conjugate eigenvalues)
+                       or "stable" (full Jury region).
+            projection_eps: epsilon buffer inset from eigenvalue stability boundaries.
+                A_high is scaled by (1 - eps) and A_low (where non-negative) by (1 + eps).
+                0.0 disables the buffer.
+            input_normalization: LRU-style per-mode input gain init. Damped only.
             r_min: minimum value for the radius in LinOSS.
             theta_max: maximum value for theta parameter in LinOSS.
+            A_max: upper bound for A in AG initialization.
+            G_max: upper bound for G in AG initialization.
             drop_rate: dropout rate for blocks.
             prenorm: whether to apply prenorm in blocks.
             use_bias: whether to use bias in GLU channel mixers.
+            dtype: dtype for LinOSS sequence mixer parameters and computation.
             *args: Additional positional arguments (ignored).
             **kwargs: Additional keyword arguments (ignored).
         """
+        if num_heads <= 0:
+            raise ValueError("num_heads must be positive")
+        if hidden_dim % num_heads != 0:
+            raise ValueError(f"hidden_dim={hidden_dim} must be divisible by num_heads={num_heads}")
+        if state_dim % num_heads != 0:
+            raise ValueError(f"state_dim={state_dim} must be divisible by num_heads={num_heads}")
+
         keys = jr.split(key, 3 * num_blocks)
 
         # Build blocks with sequence mixers and channel mixers
@@ -90,10 +119,19 @@ class LinOSS(eqx.nn.StatefulLayer, PartialModule):
                 in_features=hidden_dim,
                 key=keys[i],
                 state_dim=state_dim,
+                num_heads=num_heads,
+                use_head_output_projection=use_head_output_projection,
                 discretization=discretization,
+                initialization=initialization,
                 damping=damping,
+                stability=stability,
+                projection_eps=projection_eps,
+                input_normalization=input_normalization,
                 r_min=r_min,
                 theta_max=theta_max,
+                A_max=A_max,
+                G_max=G_max,
+                dtype=dtype,
             )
 
             # Build channel mixer

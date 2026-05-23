@@ -2,7 +2,9 @@
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import jax.random as jr
+import pytest
 
 from discretax.encoder import LinearEncoder
 from discretax.heads.classification import ClassificationHead
@@ -149,7 +151,15 @@ def test_deltanet_model_forward():
     assert y.shape == (2, 3)  # (batch_size, out_features)
 
 
-def test_linoss_model_forward():
+@pytest.mark.parametrize(
+    "backbone_kwargs",
+    [
+        {"state_dim": 32},
+        {"state_dim": 32, "num_heads": 2},
+        {"state_dim": 32, "num_heads": 2, "use_head_output_projection": True},
+    ],
+)
+def test_linoss_model_forward(backbone_kwargs):
     """Test LinOSS model forward pass with channel and sequence mixers.
 
     This test verifies that:
@@ -164,7 +174,13 @@ def test_linoss_model_forward():
 
     # Build components
     encoder = LinearEncoder(in_features=16, out_features=16, key=keys[0])
-    linoss_model = LinOSS(hidden_dim=16, num_blocks=2, state_dim=32, drop_rate=0.0, key=keys[1])
+    linoss_model = LinOSS(
+        hidden_dim=16,
+        num_blocks=2,
+        drop_rate=0.0,
+        key=keys[1],
+        **backbone_kwargs,
+    )
     head = ClassificationHead(in_features=16, out_features=3, key=keys[2])
 
     # Compose with Sequential
@@ -181,3 +197,27 @@ def test_linoss_model_forward():
     y, _ = batched_forward(x, jr.split(jr.PRNGKey(3), 2))
 
     assert y.shape == (2, 3)  # (batch_size, out_features)
+
+
+def test_linoss_model_rejects_invalid_head_partition():
+    """LinOSS model validates multi-head hidden/state partitions clearly."""
+    with pytest.raises(ValueError, match="hidden_dim=15 must be divisible by num_heads=2"):
+        LinOSS(hidden_dim=15, state_dim=32, num_heads=2, key=jr.PRNGKey(5))
+
+    with pytest.raises(ValueError, match="state_dim=30 must be divisible by num_heads=4"):
+        LinOSS(hidden_dim=16, state_dim=30, num_heads=4, key=jr.PRNGKey(6))
+
+
+def test_linoss_model_passes_dtype_to_sequence_mixers():
+    """LinOSS model forwards dtype to its sequence mixer blocks."""
+    model = LinOSS(
+        hidden_dim=16,
+        num_blocks=2,
+        state_dim=32,
+        dtype=jnp.bfloat16,
+        key=jr.PRNGKey(7),
+    )
+
+    for block in model.blocks:
+        assert block.sequence_mixer.B.dtype == jnp.bfloat16
+        assert block.sequence_mixer.C.dtype == jnp.bfloat16
